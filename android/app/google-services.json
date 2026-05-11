@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "628649796379",
+    "project_id": "blocknova-prod",
+    "storage_bucket": "blocknova-prod.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:628649796379:android:f9005989cdd760c9d529be",
+        "android_client_info": {
+          "package_name": "Blocknova.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAHWhKtiOoTvKi1ljmv7PYJfy-PYA20o5E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
