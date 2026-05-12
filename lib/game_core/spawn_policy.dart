@@ -10,30 +10,23 @@ enum SpawnProgressionBand { opening, mid, late }
 
 /// Board-aware queue generation: solvability checks, weighting, recovery.
 abstract final class BlockSpawnPolicy {
-  static const int _maxRandomAttempts = 96;
+  static const int _maxRandomAttempts = 160;
   static const int _openingRefillCap = 2;
   static const int _midOccupancy = 22;
   static const int _lateOccupancy = 34;
   static const int _openingMediumOccupancyCap = 12;
 
-  /// Shapes with at most 3 cells — easier to place when the board is tight.
-  static final List<BlockShape> kRecoveryBiasPool = kShapePool
-      .where((s) => s.tileCount <= 3)
-      .toList();
-
-  /// Small shapes without monomino (recovery variety).
-  static final List<BlockShape> kRecoverySmallNoSingle = kShapePool
-      .where((s) => s.tileCount <= 3 && s.id != 'single')
-      .toList();
-
-  /// Small shapes for exhaustive fallback (<=3 tiles).
-  static final List<BlockShape> kSmallPool = kShapePool
-      .where((s) => s.tileCount <= 3)
-      .toList();
-
   static final BlockShape kSingle = kShapePool.firstWhere(
     (s) => s.id == 'single',
   );
+
+  static final List<BlockShape> _smallPool = kShapePool
+      .where((s) => s.tileCount <= 3)
+      .toList(growable: false);
+
+  static final List<BlockShape> _compactPool = kShapePool
+      .where((s) => s.tileCount <= 4)
+      .toList(growable: false);
 
   /// First tray or after refills. [queueRefillCount] is 0 for the initial 3-pack before any
   /// placement; increments each time a new full tray of 3 is dealt after the previous tray emptied.
@@ -42,42 +35,12 @@ abstract final class BlockSpawnPolicy {
     required Random rng,
     required int queueRefillCount,
   }) {
-    final analysis = BoardAnalysis.fromBoard(board);
-    final band = _bandFor(refillCount: queueRefillCount, analysis: analysis);
-    final danger = analysis.isDanger;
-    BlockQueue? best;
-    var bestScore = -1 << 30;
-    for (var attempt = 0; attempt < _maxRandomAttempts; attempt++) {
-      final a = _weightedPickShape(rng, band, danger: danger);
-      final b = _weightedPickShape(rng, band, danger: danger);
-      final c = _weightedPickShape(rng, band, danger: danger);
-      var hand = <BlockShape>[a, b, c];
-      hand = _maybeInjectOpeningMedium(
-        board: board,
-        band: band,
-        analysis: analysis,
-        rng: rng,
-        hand: hand,
-      );
-      if (!_passesSolvability(board, hand)) {
-        continue;
-      }
-      if (!_passesProgressionRules(analysis, band, hand)) {
-        continue;
-      }
-      if (!_passesVarietyRules(analysis, hand, maxSingles: 1)) {
-        continue;
-      }
-      final score = _puzzleHandScore(board, analysis, band, hand);
-      if (score > bestScore) {
-        bestScore = score;
-        best = BlockQueue(hand);
-      }
-    }
-    if (best != null) {
-      return best;
-    }
-    return BlockQueue(_exhaustiveFallback(board, rng));
+    final context = _SpawnContext.normal(
+      board: board,
+      rng: rng,
+      queueRefillCount: queueRefillCount,
+    );
+    return BlockQueue(_dealBestTray(context));
   }
 
   /// Rewarded continue: must guarantee at least one legal placement on current board.
@@ -85,34 +48,8 @@ abstract final class BlockSpawnPolicy {
     required BoardState board,
     required Random rng,
   }) {
-    final analysis = BoardAnalysis.fromBoard(board);
-    final danger = analysis.isDanger;
-    BlockQueue? best;
-    var bestScore = -1 << 30;
-    for (var attempt = 0; attempt < _maxRandomAttempts; attempt++) {
-      final a = _pickRecoveryShape(rng, danger: danger);
-      final b = _pickRecoveryShape(rng, danger: danger);
-      final c = _pickRecoveryShape(rng, danger: danger);
-      final hand = <BlockShape>[a, b, c];
-      if (!_passesSolvability(board, hand)) {
-        continue;
-      }
-      if (!_passesRecoveryAntiFrustration(board, analysis, hand)) {
-        continue;
-      }
-      if (!_passesVarietyRules(analysis, hand, maxSingles: danger ? 2 : 1)) {
-        continue;
-      }
-      final score = _puzzleHandScore(board, analysis, SpawnProgressionBand.late, hand);
-      if (score > bestScore) {
-        bestScore = score;
-        best = BlockQueue(hand);
-      }
-    }
-    if (best != null) {
-      return best;
-    }
-    return BlockQueue(_exhaustiveFallback(board, rng));
+    final context = _SpawnContext.recovery(board: board, rng: rng);
+    return BlockQueue(_dealBestTray(context));
   }
 
   /// Max lattice-aligned placements on an empty [boardSize] square (upper bound for normalization).
@@ -145,62 +82,44 @@ abstract final class BlockSpawnPolicy {
     return xSpan * ySpan;
   }
 
-  /// Composite score: normalized placement utility, variety, size mix; not dominated by monominos.
-  static int _puzzleHandScore(
-    BoardState board,
-    BoardAnalysis analysis,
-    SpawnProgressionBand band,
-    List<BlockShape> hand,
-  ) {
-    final n = board.size;
-    var placementPart = 0;
-    for (final shape in hand) {
-      final legal = BoardAnalysis.legalPlacementCount(board, shape);
-      final cap = max(1, maxLatticePlacements(shape, n));
-      placementPart += (1000 * legal) ~/ cap;
-    }
+  static List<BlockShape> _dealBestTray(_SpawnContext context) {
+    List<BlockShape>? best;
+    var bestScore = -1 << 30;
 
-    final ids = hand.map((s) => s.id).toSet();
-    final varietyBonus = ids.length * 85;
-
-    var dupPenalty = 0;
-    for (final s in hand) {
-      final nSame = hand.where((x) => x.id == s.id).length;
-      if (nSame > 1) {
-        dupPenalty += (nSame - 1) * 40;
+    for (var attempt = 0; attempt < _maxRandomAttempts; attempt++) {
+      final hand = _generateCandidate(context);
+      if (!_passesHardFilters(context, hand)) {
+        continue;
+      }
+      final score = _scoreTray(context, hand);
+      if (score > bestScore) {
+        bestScore = score;
+        best = hand;
       }
     }
 
-    var sizeMix = 0;
-    if (band != SpawnProgressionBand.opening &&
-        hand.any((s) => s.tileCount >= 4 && s.tileCount < 9)) {
-      sizeMix = 140;
-    }
-
-    final tie = analysis.nearFullRowCount + analysis.nearFullColCount;
-    return placementPart + varietyBonus - dupPenalty + sizeMix + tie;
+    return best ?? _exhaustiveFallback(context);
   }
 
-  static bool _passesVarietyRules(
-    BoardAnalysis analysis,
-    List<BlockShape> hand, {
-    required int maxSingles,
-  }) {
-    final singles = hand.where((s) => s.id == 'single').length;
-    return singles <= maxSingles;
+  static List<BlockShape> _generateCandidate(_SpawnContext context) {
+    var hand = <BlockShape>[
+      _weightedPickShape(context),
+      _weightedPickShape(context),
+      _weightedPickShape(context),
+    ];
+    hand = _maybeInjectOpeningMedium(context, hand);
+    hand.shuffle(context.rng);
+    return hand;
   }
 
-  static List<BlockShape> _maybeInjectOpeningMedium({
-    required BoardState board,
-    required SpawnProgressionBand band,
-    required BoardAnalysis analysis,
-    required Random rng,
-    required List<BlockShape> hand,
-  }) {
-    if (band != SpawnProgressionBand.opening) {
+  static List<BlockShape> _maybeInjectOpeningMedium(
+    _SpawnContext context,
+    List<BlockShape> hand,
+  ) {
+    if (context.recovery || context.band != SpawnProgressionBand.opening) {
       return hand;
     }
-    if (analysis.occupancy > _openingMediumOccupancyCap) {
+    if (context.analysis.occupancy > _openingMediumOccupancyCap) {
       return hand;
     }
     if (hand.any((s) => s.tileCount >= 3 && s.tileCount <= 4)) {
@@ -213,102 +132,87 @@ abstract final class BlockSpawnPolicy {
       return hand;
     }
     final next = hand.toList();
-    next[rng.nextInt(3)] = mediums[rng.nextInt(mediums.length)];
+    next[context.rng.nextInt(3)] = mediums[context.rng.nextInt(mediums.length)];
     return next;
   }
 
-  static int _weightForShape(BlockShape s, SpawnProgressionBand band, {required bool danger}) {
-    final t = s.tileCount;
-    if (s.id == 'single') {
-      if (danger) {
-        return 16;
-      }
-      switch (band) {
-        case SpawnProgressionBand.opening:
-          return 5;
-        case SpawnProgressionBand.mid:
-          return 4;
-        case SpawnProgressionBand.late:
-          return 3;
-      }
-    }
-    if (t == 2) {
-      return 14;
-    }
-    if (t == 3) {
-      return 15;
-    }
-    if (t == 4) {
-      return 14;
-    }
-    if (t == 5) {
-      return 11;
-    }
-    if (t >= 9) {
-      return band == SpawnProgressionBand.opening ? 0 : 3;
-    }
-    return 11;
-  }
-
-  static BlockShape _weightedPickShape(
-    Random rng,
-    SpawnProgressionBand band, {
-    required bool danger,
-  }) {
+  static BlockShape _weightedPickShape(_SpawnContext context) {
+    final pool = context.recovery ? _compactPool : kShapePool;
     var total = 0;
     final weights = <int>[];
-    for (final s in kShapePool) {
-      final w = _weightForShape(s, band, danger: danger);
+    for (final shape in pool) {
+      final w = _weightForShape(context, shape);
       weights.add(w);
       total += w;
     }
     if (total <= 0) {
-      return kShapePool[rng.nextInt(kShapePool.length)];
+      return pool[context.rng.nextInt(pool.length)];
     }
-    var r = rng.nextInt(total);
-    for (var i = 0; i < kShapePool.length; i++) {
-      r -= weights[i];
-      if (r < 0) {
-        return kShapePool[i];
-      }
-    }
-    return kShapePool.last;
-  }
 
-  static int _weightRecoveryShape(BlockShape s, {required bool danger}) {
-    if (s.id == 'single') {
-      return danger ? 16 : 4;
-    }
-    final t = s.tileCount;
-    if (t == 2) {
-      return 14;
-    }
-    if (t == 3) {
-      return 14;
-    }
-    return 10;
-  }
-
-  static BlockShape _pickRecoveryShape(Random rng, {required bool danger}) {
-    final pool = kRecoveryBiasPool;
-    var total = 0;
-    final weights = <int>[];
-    for (final s in pool) {
-      final w = _weightRecoveryShape(s, danger: danger);
-      weights.add(w);
-      total += w;
-    }
-    if (total <= 0) {
-      return pool[rng.nextInt(pool.length)];
-    }
-    var r = rng.nextInt(total);
+    var roll = context.rng.nextInt(total);
     for (var i = 0; i < pool.length; i++) {
-      r -= weights[i];
-      if (r < 0) {
+      roll -= weights[i];
+      if (roll < 0) {
         return pool[i];
       }
     }
     return pool.last;
+  }
+
+  static int _weightForShape(_SpawnContext context, BlockShape s) {
+    final t = s.tileCount;
+    final danger = context.analysis.isDanger;
+
+    if (s.id == 'single') {
+      if (context.recovery) {
+        return danger ? 22 : 7;
+      }
+      switch (context.band) {
+        case SpawnProgressionBand.opening:
+          return 4;
+        case SpawnProgressionBand.mid:
+          return danger ? 12 : 3;
+        case SpawnProgressionBand.late:
+          return danger ? 14 : 2;
+      }
+    }
+
+    if (context.recovery) {
+      if (t == 2) {
+        return danger ? 18 : 15;
+      }
+      if (t == 3) {
+        return danger ? 16 : 15;
+      }
+      if (t == 4) {
+        return danger ? 6 : 10;
+      }
+      return 0;
+    }
+
+    if (t == 2) {
+      return danger ? 18 : 13;
+    }
+    if (t == 3) {
+      return danger ? 17 : 15;
+    }
+    if (t == 4) {
+      return danger ? 8 : 15;
+    }
+    if (t == 5) {
+      return switch (context.band) {
+        SpawnProgressionBand.opening => danger ? 2 : 8,
+        SpawnProgressionBand.mid => danger ? 5 : 13,
+        SpawnProgressionBand.late => danger ? 4 : 10,
+      };
+    }
+    if (t >= 9) {
+      if (danger || context.band == SpawnProgressionBand.opening) {
+        return 0;
+      }
+      return context.band == SpawnProgressionBand.mid ? 2 : 1;
+    }
+    return 11;
   }
 
   static SpawnProgressionBand _bandFor({
@@ -327,48 +231,30 @@ abstract final class BlockSpawnPolicy {
     return SpawnProgressionBand.opening;
   }
 
-  static bool _passesSolvability(BoardState board, List<BlockShape> hand) {
-    if (!BoardAnalysis.queueHasAnyLegalMove(board, hand)) {
+  static bool _passesHardFilters(_SpawnContext context, List<BlockShape> hand) {
+    final analysis = context.analysis;
+    if (hand.length != 3) {
       return false;
     }
-    final usable = BoardAnalysis.usableShapeCount(board, hand);
-    if (usable < 2) {
+    if (!_queueHasAnyLegalMove(context, hand)) {
       return false;
     }
-    return true;
-  }
+    if (_usableShapeCount(context, hand) < 2) {
+      return false;
+    }
+    if (_singleCount(hand) > context.maxSingles) {
+      return false;
+    }
 
-  static bool _passesRecoveryAntiFrustration(
-    BoardState board,
-    BoardAnalysis analysis,
-    List<BlockShape> hand,
-  ) {
-    final large = hand.where((s) => s.tileCount >= 5).length;
-    if (analysis.isDanger && large >= 2) {
-      return false;
-    }
-    if (analysis.isDanger && hand.every((s) => s.tileCount >= 4)) {
-      return false;
-    }
-    if (!hand.any((s) => s.tileCount <= 3)) {
-      return false;
-    }
-    return true;
-  }
-
-  static bool _passesProgressionRules(
-    BoardAnalysis analysis,
-    SpawnProgressionBand band,
-    List<BlockShape> hand,
-  ) {
+    final hasSmall = hand.any((s) => s.tileCount <= 3);
     final large = hand.where((s) => s.tileCount >= 5).length;
     final huge = hand.where((s) => s.tileCount >= 9).length;
 
     if (analysis.isDanger) {
-      if (hand.every((s) => s.tileCount >= 4)) {
+      if (!hasSmall) {
         return false;
       }
-      if (!hand.any((s) => s.tileCount <= 3)) {
+      if (hand.every((s) => s.tileCount >= 4)) {
         return false;
       }
       if (large >= 2) {
@@ -376,23 +262,36 @@ abstract final class BlockSpawnPolicy {
       }
     }
 
-    switch (band) {
+    if (context.recovery) {
+      if (!hasSmall) {
+        return false;
+      }
+      if (large > 0) {
+        return false;
+      }
+      if (analysis.isDanger && hand.every((s) => s.tileCount >= 4)) {
+        return false;
+      }
+      return true;
+    }
+
+    switch (context.band) {
       case SpawnProgressionBand.opening:
         if (large > 1) {
-          return false;
-        }
-        if (!hand.any((s) => s.tileCount <= 3)) {
           return false;
         }
         if (huge > 0) {
           return false;
         }
-        break;
-      case SpawnProgressionBand.mid:
-        if (large > 2) {
+        if (!hasSmall) {
+          return false;
+        }
+        if (analysis.occupancy <= _openingMediumOccupancyCap &&
+            !hand.any((s) => s.tileCount >= 3 && s.tileCount <= 4)) {
           return false;
         }
         break;
+      case SpawnProgressionBand.mid:
       case SpawnProgressionBand.late:
         if (large > 2) {
           return false;
@@ -403,59 +302,319 @@ abstract final class BlockSpawnPolicy {
     return true;
   }
 
-  /// Guaranteed playable; prefers ≤1 single, then ≤2 singles, then triple single.
-  static List<BlockShape> _exhaustiveFallback(BoardState board, Random rng) {
-    final boardAnalysis = BoardAnalysis.fromBoard(board);
-    for (var attempt = 0; attempt < 500; attempt++) {
-      final a = kSmallPool[rng.nextInt(kSmallPool.length)];
-      final b = kSmallPool[rng.nextInt(kSmallPool.length)];
-      final c = kSmallPool[rng.nextInt(kSmallPool.length)];
-      var hand = <BlockShape>[a, b, c];
-      hand.shuffle(rng);
-      if (_passesVarietyRules(boardAnalysis, hand, maxSingles: 1) &&
-          _passesSolvability(board, hand)) {
-        return hand;
+  static int _scoreTray(_SpawnContext context, List<BlockShape> hand) {
+    final analysis = context.analysis;
+    final board = context.board;
+    final legalCounts = [
+      for (final shape in hand) _legalPlacementCount(context, shape),
+    ];
+    final usable = legalCounts.where((n) => n > 0).length;
+    final small = hand.where((s) => s.tileCount <= 3).length;
+    final medium = hand
+        .where((s) => s.tileCount >= 4 && s.tileCount <= 5)
+        .length;
+    final large = hand.where((s) => s.tileCount >= 5).length;
+    final huge = hand.where((s) => s.tileCount >= 9).length;
+
+    var score = usable * 2200;
+    for (var i = 0; i < hand.length; i++) {
+      final cap = max(1, maxLatticePlacements(hand[i], board.size));
+      score += (1000 * legalCounts[i]) ~/ cap;
+    }
+
+    score += hand.map((s) => s.id).toSet().length * 170;
+    score -= _duplicatePenalty(hand);
+
+    final linePotential = _bestLineClearPotential(context, hand);
+    final linePressure = analysis.nearFullRowCount + analysis.nearFullColCount;
+    score += linePotential * (linePressure > 0 ? 520 : 260);
+
+    if (small >= 1 && medium >= 1) {
+      score += 280;
+    }
+    if (!context.recovery &&
+        context.band != SpawnProgressionBand.opening &&
+        large == 1) {
+      score += 180;
+    }
+    if (!context.recovery &&
+        context.band != SpawnProgressionBand.opening &&
+        small == 3) {
+      score -= 260;
+    }
+    if (context.band == SpawnProgressionBand.opening && medium >= 1) {
+      score += 230;
+    }
+    if (context.band == SpawnProgressionBand.opening && large > 0) {
+      score -= large * 120;
+    }
+    if (analysis.isDanger || context.recovery) {
+      score += small * 260;
+      score -= large * 520;
+      score -= huge * 900;
+    }
+    if (analysis.disconnectedEmptyCells >= 6) {
+      score += small * 180;
+      score += hand.where((s) => s.tileCount == 4).length * 70;
+      score -= large * 180;
+    }
+    if (_singleCount(hand) > 0 && !analysis.isDanger && !context.recovery) {
+      score -= 100;
+    }
+
+    // Keep seeded runs stable while avoiding same-score bias toward pool order.
+    score += context.rng.nextInt(17);
+    return score;
+  }
+
+  static int _bestLineClearPotential(
+    _SpawnContext context,
+    List<BlockShape> hand,
+  ) {
+    var best = 0;
+    for (final shape in hand) {
+      final clears = context.lineClearPotential[shape.id] ?? 0;
+      if (clears > best) {
+        best = clears;
+      }
+    }
+    return best;
+  }
+
+  static int _duplicatePenalty(List<BlockShape> hand) {
+    var penalty = 0;
+    final seen = <String, int>{};
+    for (final shape in hand) {
+      final count = (seen[shape.id] ?? 0) + 1;
+      seen[shape.id] = count;
+      if (count > 1) {
+        penalty += count * 90;
+      }
+    }
+    return penalty;
+  }
+
+  static int _singleCount(List<BlockShape> hand) {
+    return hand.where((s) => s.id == 'single').length;
+  }
+
+  /// Guaranteed playable fallback; relaxes single limits only when the board leaves no better tray.
+  static List<BlockShape> _exhaustiveFallback(_SpawnContext context) {
+    final pools = context.recovery || context.analysis.isDanger
+        ? <List<BlockShape>>[_compactPool, _smallPool]
+        : <List<BlockShape>>[kShapePool, _compactPool, _smallPool];
+
+    for (final pool in pools) {
+      final best = _bestFromPool(
+        context: context,
+        pool: pool,
+        maxSingles: context.maxSingles,
+        minUsable: 2,
+        enforceProgression: true,
+      );
+      if (best != null) {
+        return best;
       }
     }
 
-    for (final a in kSmallPool) {
-      for (final b in kSmallPool) {
-        for (final c in kSmallPool) {
+    for (final pool in [_compactPool, _smallPool]) {
+      final best = _bestFromPool(
+        context: context,
+        pool: pool,
+        maxSingles: 2,
+        minUsable: 2,
+        enforceProgression: false,
+      );
+      if (best != null) {
+        return best;
+      }
+    }
+
+    for (final pool in [_smallPool]) {
+      final best = _bestFromPool(
+        context: context,
+        pool: pool,
+        maxSingles: 3,
+        minUsable: 1,
+        enforceProgression: false,
+      );
+      if (best != null) {
+        return best;
+      }
+    }
+
+    return <BlockShape>[kSingle, kSingle, kSingle];
+  }
+
+  static List<BlockShape>? _bestFromPool({
+    required _SpawnContext context,
+    required List<BlockShape> pool,
+    required int maxSingles,
+    required int minUsable,
+    required bool enforceProgression,
+  }) {
+    List<BlockShape>? best;
+    var bestScore = -1 << 30;
+    for (final a in pool) {
+      for (final b in pool) {
+        for (final c in pool) {
           final hand = <BlockShape>[a, b, c];
-          if (_passesVarietyRules(boardAnalysis, hand, maxSingles: 1) &&
-              _passesSolvability(board, hand)) {
-            return hand;
+          if (_singleCount(hand) > maxSingles) {
+            continue;
+          }
+          if (!_queueHasAnyLegalMove(context, hand)) {
+            continue;
+          }
+          if (_usableShapeCount(context, hand) < minUsable) {
+            continue;
+          }
+          if (enforceProgression &&
+              !_passesFallbackProgression(context, hand)) {
+            continue;
+          }
+          final score = _scoreTray(context, hand);
+          if (score > bestScore) {
+            bestScore = score;
+            best = hand;
           }
         }
       }
     }
+    if (best == null) {
+      return null;
+    }
+    final next = best.toList()..shuffle(context.rng);
+    return next;
+  }
 
-    for (final a in kSmallPool) {
-      for (final b in kSmallPool) {
-        for (final c in kSmallPool) {
-          final hand = <BlockShape>[a, b, c];
-          if (_passesVarietyRules(boardAnalysis, hand, maxSingles: 2) &&
-              _passesSolvability(board, hand)) {
-            return hand;
+  static bool _passesFallbackProgression(
+    _SpawnContext context,
+    List<BlockShape> hand,
+  ) {
+    final analysis = context.analysis;
+    final large = hand.where((s) => s.tileCount >= 5).length;
+    final hasSmall = hand.any((s) => s.tileCount <= 3);
+    if ((analysis.isDanger || context.recovery) && !hasSmall) {
+      return false;
+    }
+    if ((analysis.isDanger || context.recovery) && large >= 2) {
+      return false;
+    }
+    if (context.band == SpawnProgressionBand.opening && large > 1) {
+      return false;
+    }
+    return true;
+  }
+
+  static bool _queueHasAnyLegalMove(
+    _SpawnContext context,
+    List<BlockShape> hand,
+  ) {
+    return hand.any((shape) => _legalPlacementCount(context, shape) > 0);
+  }
+
+  static int _usableShapeCount(_SpawnContext context, List<BlockShape> hand) {
+    var count = 0;
+    for (final shape in hand) {
+      if (_legalPlacementCount(context, shape) > 0) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  static int _legalPlacementCount(_SpawnContext context, BlockShape shape) {
+    return context.legalPlacements[shape.id] ??
+        BoardAnalysis.legalPlacementCount(context.board, shape);
+  }
+
+  static Map<String, int> _precomputeLegalPlacements(BoardState board) {
+    return {
+      for (final shape in kShapePool)
+        shape.id: BoardAnalysis.legalPlacementCount(board, shape),
+    };
+  }
+
+  static Map<String, int> _precomputeLineClearPotential(BoardState board) {
+    final values = <String, int>{};
+    for (final shape in kShapePool) {
+      var best = 0;
+      for (var y = 0; y < board.size; y++) {
+        for (var x = 0; x < board.size; x++) {
+          if (!board.canPlace(shape: shape, originX: x, originY: y)) {
+            continue;
+          }
+          final clears = board
+              .place(shape: shape, originX: x, originY: y)
+              .clearCompletedLines()
+              .clearedLineCount;
+          if (clears > best) {
+            best = clears;
           }
         }
       }
+      values[shape.id] = best;
     }
-
-    final single = kSingle;
-    for (var attempt = 0; attempt < 200; attempt++) {
-      final a = kRecoverySmallNoSingle.isEmpty
-          ? kSmallPool[rng.nextInt(kSmallPool.length)]
-          : kRecoverySmallNoSingle[rng.nextInt(kRecoverySmallNoSingle.length)];
-      final b = kSmallPool[rng.nextInt(kSmallPool.length)];
-      final hand = <BlockShape>[single, a, b]..shuffle(rng);
-      if (_passesVarietyRules(boardAnalysis, hand, maxSingles: 1) &&
-          _passesSolvability(board, hand)) {
-        return hand;
-      }
-    }
-
-    return <BlockShape>[single, single, single];
+    return values;
   }
 }
 
+class _SpawnContext {
+  _SpawnContext._({
+    required this.board,
+    required this.rng,
+    required this.analysis,
+    required this.band,
+    required this.recovery,
+    required this.maxSingles,
+    required this.legalPlacements,
+    required this.lineClearPotential,
+  });
+
+  factory _SpawnContext.normal({
+    required BoardState board,
+    required Random rng,
+    required int queueRefillCount,
+  }) {
+    final analysis = BoardAnalysis.fromBoard(board);
+    return _SpawnContext._(
+      board: board,
+      rng: rng,
+      analysis: analysis,
+      band: BlockSpawnPolicy._bandFor(
+        refillCount: queueRefillCount,
+        analysis: analysis,
+      ),
+      recovery: false,
+      maxSingles: 1,
+      legalPlacements: BlockSpawnPolicy._precomputeLegalPlacements(board),
+      lineClearPotential: BlockSpawnPolicy._precomputeLineClearPotential(board),
+    );
+  }
+
+  factory _SpawnContext.recovery({
+    required BoardState board,
+    required Random rng,
+  }) {
+    final analysis = BoardAnalysis.fromBoard(board);
+    return _SpawnContext._(
+      board: board,
+      rng: rng,
+      analysis: analysis,
+      band: SpawnProgressionBand.late,
+      recovery: true,
+      maxSingles: analysis.isDanger ? 2 : 1,
+      legalPlacements: BlockSpawnPolicy._precomputeLegalPlacements(board),
+      lineClearPotential: BlockSpawnPolicy._precomputeLineClearPotential(board),
+    );
+  }
+
+  final BoardState board;
+  final Random rng;
+  final BoardAnalysis analysis;
+  final SpawnProgressionBand band;
+  final bool recovery;
+  final int maxSingles;
+  final Map<String, int> legalPlacements;
+  final Map<String, int> lineClearPotential;
+}

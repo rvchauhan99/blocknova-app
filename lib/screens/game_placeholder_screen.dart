@@ -16,7 +16,8 @@ import '../game_core/game_session.dart';
 import '../game_core/grid_point.dart';
 import '../game_runtime/ad_guardrails.dart';
 import '../game_runtime/flame/stage2_flame_game.dart';
-import '../game_runtime/runtime_feedback.dart' show RuntimeEventType, RuntimeFeedbackEvent;
+import '../game_runtime/runtime_feedback.dart'
+    show RuntimeEventType, RuntimeFeedbackEvent;
 import '../game_runtime/runtime_session_driver.dart';
 import '../platform_services/ads/admob_ads_service.dart';
 import '../platform_services/ads/ads_service.dart';
@@ -68,22 +69,29 @@ class Stage2BoardScreen extends StatefulWidget {
     this.backendService,
     this.hapticsService,
     this.audioService,
+    this.initialContinueUsedInCurrentRun = false,
   });
 
   final GameSession? initialSession;
   final AdsService? adsService;
   final AnalyticsService? analyticsService;
   final BlocknovaBackendService? backendService;
+
   /// When null, uses [SystemHapticsService] (tests may inject a no-op stub).
   final HapticsService? hapticsService;
+
   /// When null, uses [AssetAudioService] (tests should inject [StubAudioService]).
   final AudioService? audioService;
+
+  /// Test hook for restoring a run that already consumed its rewarded continue.
+  final bool initialContinueUsedInCurrentRun;
 
   @override
   State<Stage2BoardScreen> createState() => _Stage2BoardScreenState();
 }
 
-class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProviderStateMixin {
+class _Stage2BoardScreenState extends State<Stage2BoardScreen>
+    with TickerProviderStateMixin {
   static const String _runMode = 'sandbox';
 
   late GameSession _session;
@@ -115,11 +123,16 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
   late AnimationController _boardPulseController;
   final List<_FlyoutItem> _flyouts = <_FlyoutItem>[];
   final List<Timer> _flyoutTimers = <Timer>[];
+  int? _draggingQueueIndex;
+  Offset? _dragPointerGlobalPosition;
+  Offset _dragFeedbackAnchorOffset = Offset.zero;
+  final ValueNotifier<bool> _dragIsOverBoard = ValueNotifier<bool>(false);
 
   @override
   void initState() {
     super.initState();
     _session = widget.initialSession ?? GameSession.stage2Start();
+    _continueUsedInCurrentRun = widget.initialContinueUsedInCurrentRun;
     _haptics = widget.hapticsService ?? SystemHapticsService();
     _audio = widget.audioService ?? AssetAudioService();
     _runtimeDriver = RuntimeSessionDriver(
@@ -129,10 +142,7 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
     _adsService = widget.adsService ?? AdMobAdsService();
     _analytics = widget.analyticsService ?? DebugAnalyticsService();
     _backend = widget.backendService ?? BlocknovaBackendService();
-    _flameGame = Stage2FlameGame(
-      onCellTap: _tapCell,
-      initialSession: _session,
-    );
+    _flameGame = Stage2FlameGame(onCellTap: _tapCell, initialSession: _session);
     _comboPopController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 720),
@@ -141,22 +151,36 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
       vsync: this,
       duration: const Duration(milliseconds: 220),
     );
-    _shakeTween = TweenSequence<double>(<TweenSequenceItem<double>>[
-      TweenSequenceItem(tween: Tween(begin: 0, end: -14), weight: 1),
-      TweenSequenceItem(tween: Tween(begin: -14, end: 14), weight: 2),
-      TweenSequenceItem(tween: Tween(begin: 14, end: -10), weight: 2),
-      TweenSequenceItem(tween: Tween(begin: -10, end: 6), weight: 2),
-      TweenSequenceItem(tween: Tween(begin: 6, end: -2), weight: 1),
-      TweenSequenceItem(tween: Tween(begin: -2, end: 0), weight: 1),
-    ]).animate(CurvedAnimation(parent: _shakeController, curve: Curves.easeOut));
+    _shakeTween = TweenSequence<double>(
+      <TweenSequenceItem<double>>[
+        TweenSequenceItem(tween: Tween(begin: 0, end: -14), weight: 1),
+        TweenSequenceItem(tween: Tween(begin: -14, end: 14), weight: 2),
+        TweenSequenceItem(tween: Tween(begin: 14, end: -10), weight: 2),
+        TweenSequenceItem(tween: Tween(begin: -10, end: 6), weight: 2),
+        TweenSequenceItem(tween: Tween(begin: 6, end: -2), weight: 1),
+        TweenSequenceItem(tween: Tween(begin: -2, end: 0), weight: 1),
+      ],
+    ).animate(CurvedAnimation(parent: _shakeController, curve: Curves.easeOut));
     _scoreBumpController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 380),
     );
-    _scoreBumpAnim = TweenSequence<double>(<TweenSequenceItem<double>>[
-      TweenSequenceItem(tween: Tween<double>(begin: 1, end: 1.12), weight: 28),
-      TweenSequenceItem(tween: Tween<double>(begin: 1.12, end: 1), weight: 72),
-    ]).animate(CurvedAnimation(parent: _scoreBumpController, curve: Curves.easeOutCubic));
+    _scoreBumpAnim =
+        TweenSequence<double>(<TweenSequenceItem<double>>[
+          TweenSequenceItem(
+            tween: Tween<double>(begin: 1, end: 1.12),
+            weight: 28,
+          ),
+          TweenSequenceItem(
+            tween: Tween<double>(begin: 1.12, end: 1),
+            weight: 72,
+          ),
+        ]).animate(
+          CurvedAnimation(
+            parent: _scoreBumpController,
+            curve: Curves.easeOutCubic,
+          ),
+        );
     _boardPulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 220),
@@ -168,7 +192,10 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
         return;
       }
       unawaited(
-        _analytics.logEvent('screen_view', parameters: <String, Object?>{'screen_name': 'game'}),
+        _analytics.logEvent(
+          'screen_view',
+          parameters: <String, Object?>{'screen_name': 'game'},
+        ),
       );
     });
     _warmupAds();
@@ -195,6 +222,7 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
     _shakeController.dispose();
     _scoreBumpController.dispose();
     _boardPulseController.dispose();
+    _dragIsOverBoard.dispose();
     unawaited(_audio.dispose());
     super.dispose();
   }
@@ -238,16 +266,24 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
   }
 
   void _recordRunOutcome({required String endReason}) {
-    if (_runRecorded) return;
+    if (_runRecorded) {
+      return;
+    }
     _runRecorded = true;
-    
-    if (endReason == 'abandoned' && _placementMoves == 0 && _session.score == 0) return;
+
+    if (endReason == 'abandoned' &&
+        _placementMoves == 0 &&
+        _session.score == 0) {
+      return;
+    }
 
     final anchor = _runStartedAt;
-    final durationSec = anchor == null ? 0 : DateTime.now().difference(anchor).inSeconds;
-    
+    final durationSec = anchor == null
+        ? 0
+        : DateTime.now().difference(anchor).inSeconds;
+
     unawaited(PersonalBestStore.recordIfBetter(_session.score));
-    
+
     unawaited(
       _analytics.logEvent(
         'run_end',
@@ -363,7 +399,9 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
       unawaited(
         _analytics.logEvent(
           'line_clear',
-          parameters: <String, Object?>{'lines_cleared': lineClearEvent.clearedLines},
+          parameters: <String, Object?>{
+            'lines_cleared': lineClearEvent.clearedLines,
+          },
         ),
       );
     }
@@ -377,16 +415,19 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
     }
 
     if (lineClearEvent != null || _placedFlashKeys.isNotEmpty) {
-      Future<void>.delayed(const Duration(milliseconds: 240), () {
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _placedFlashKeys = <int>{};
-          _clearedFlashKeys = <int>{};
-        });
-        _syncFlameBoard();
-      });
+      Future<void>.delayed(
+        Duration(milliseconds: lineClearEvent != null ? 420 : 240),
+        () {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _placedFlashKeys = <int>{};
+            _clearedFlashKeys = <int>{};
+          });
+          _syncFlameBoard();
+        },
+      );
     }
 
     if (_invalidTapKey != null) {
@@ -427,13 +468,13 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
       isGameOver: _session.isGameOver,
       continueUsedInCurrentRun: _continueUsedInCurrentRun,
     )) {
-      setState(() {
-        _continueLoading = true;
-      });
       if (_continueUsedInCurrentRun) {
         _pushFlyout('Only one continue per run.', const Color(0xFFFF3B30));
       } else {
-        _pushFlyout('Continue is only available at game over.', const Color(0xFFFF3B30));
+        _pushFlyout(
+          'Continue is only available at game over.',
+          const Color(0xFFFF3B30),
+        );
       }
       _syncFlameBoard();
       return;
@@ -477,7 +518,10 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
     setState(() {
       _continueLoading = false;
     });
-    _pushFlyout('Continue unavailable ($code). You can end run.', const Color(0xFFFF3B30));
+    _pushFlyout(
+      'Continue unavailable ($code). You can end run.',
+      const Color(0xFFFF3B30),
+    );
     _syncFlameBoard();
   }
 
@@ -498,7 +542,9 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
       await _analytics.logEvent(
         'interstitial_skipped',
         parameters: <String, Object?>{
-          'reason': interstitialResult.skipReason?.name ?? InterstitialSkipReason.error.name,
+          'reason':
+              interstitialResult.skipReason?.name ??
+              InterstitialSkipReason.error.name,
         },
       );
     }
@@ -600,7 +646,10 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
           children: [
             Text(
               BlastNovaBrand.kPauseTitle,
-              style: Theme.of(ctx).textTheme.headlineSmall?.copyWith(color: Colors.white, fontWeight: FontWeight.w800),
+              style: Theme.of(ctx).textTheme.headlineSmall?.copyWith(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+              ),
             ),
             const SizedBox(height: 16),
             FilledButton(
@@ -619,6 +668,223 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
 
   final GlobalKey _boardKey = GlobalKey();
 
+  bool _isGlobalPointInsideBoard(Offset globalOffset) {
+    final boardContext = _boardKey.currentContext;
+    final renderObject = boardContext?.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) {
+      return false;
+    }
+
+    final localOffset = renderObject.globalToLocal(globalOffset);
+    final side = math.min(renderObject.size.width, renderObject.size.height);
+    return side > 0 &&
+        localOffset.dx >= 0 &&
+        localOffset.dy >= 0 &&
+        localOffset.dx <= side &&
+        localOffset.dy <= side;
+  }
+
+  _BoardDropPreview? _previewForGlobalOffset({
+    required int queueIndex,
+    required Offset globalOffset,
+  }) {
+    if (queueIndex < 0 || queueIndex >= _session.queue.items.length) {
+      return null;
+    }
+    final boardContext = _boardKey.currentContext;
+    final renderObject = boardContext?.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) {
+      return null;
+    }
+
+    final localOffset = renderObject.globalToLocal(globalOffset);
+    final side = math.min(renderObject.size.width, renderObject.size.height);
+    if (side <= 0 ||
+        localOffset.dx < 0 ||
+        localOffset.dy < 0 ||
+        localOffset.dx > side ||
+        localOffset.dy > side) {
+      return null;
+    }
+
+    final shape = _session.queue.items[queueIndex];
+    final center = _shapeCenterOffset(shape);
+    final cell = side / _session.board.size;
+    final rawOriginX = (localOffset.dx / cell).floor() - center.dx;
+    final rawOriginY = (localOffset.dy / cell).floor() - center.dy;
+    final bounds = _shapeBounds(shape);
+    final minOriginX = -bounds.minX;
+    final maxOriginX = _session.board.size - 1 - bounds.maxX;
+    final minOriginY = -bounds.minY;
+    final maxOriginY = _session.board.size - 1 - bounds.maxY;
+    final originX = math.max(minOriginX, math.min(maxOriginX, rawOriginX));
+    final originY = math.max(minOriginY, math.min(maxOriginY, rawOriginY));
+    final isValid = _session.board.canPlace(
+      shape: shape,
+      originX: originX,
+      originY: originY,
+    );
+
+    return _BoardDropPreview(
+      queueIndex: queueIndex,
+      shape: shape,
+      originX: originX,
+      originY: originY,
+      isValid: isValid,
+    );
+  }
+
+  GridPoint _shapeCenterOffset(BlockShape shape) {
+    final bounds = _shapeBounds(shape);
+    return GridPoint(
+      ((bounds.minX + bounds.maxX) / 2).round(),
+      ((bounds.minY + bounds.maxY) / 2).round(),
+    );
+  }
+
+  _ShapeBounds _shapeBounds(BlockShape shape) {
+    var minX = shape.cells.first.dx;
+    var maxX = shape.cells.first.dx;
+    var minY = shape.cells.first.dy;
+    var maxY = shape.cells.first.dy;
+    for (final c in shape.cells) {
+      minX = math.min(minX, c.dx);
+      maxX = math.max(maxX, c.dx);
+      minY = math.min(minY, c.dy);
+      maxY = math.max(maxY, c.dy);
+    }
+    return _ShapeBounds(minX: minX, maxX: maxX, minY: minY, maxY: maxY);
+  }
+
+  void _updateDragPreview(DragTargetDetails<int> details) {
+    final preview = _previewForDragOffset(
+      queueIndex: details.data,
+      dragOffset: details.offset,
+    );
+    if (preview == null) {
+      _setDragIsOverBoard(false);
+      _flameGame.clearPreview();
+      return;
+    }
+    _setDragIsOverBoard(true);
+    _flameGame.setPreview(
+      preview.shape,
+      preview.originX,
+      preview.originY,
+      isValid: preview.isValid,
+    );
+  }
+
+  void _setDragIsOverBoard(bool value) {
+    if (_dragIsOverBoard.value == value) {
+      return;
+    }
+    _dragIsOverBoard.value = value;
+  }
+
+  void _clearDragState() {
+    if (!mounted) {
+      return;
+    }
+    _setDragIsOverBoard(false);
+    _dragPointerGlobalPosition = null;
+    _dragFeedbackAnchorOffset = Offset.zero;
+    setState(() {
+      _draggingQueueIndex = null;
+    });
+    _flameGame.clearPreview();
+  }
+
+  Offset _pointerGlobalFromDragOffset(Offset dragOffset) {
+    return dragOffset + _dragFeedbackAnchorOffset;
+  }
+
+  _BoardDropPreview? _previewForDragOffset({
+    required int queueIndex,
+    required Offset dragOffset,
+  }) {
+    return _previewForGlobalOffset(
+          queueIndex: queueIndex,
+          globalOffset: _pointerGlobalFromDragOffset(dragOffset),
+        ) ??
+        _previewForGlobalOffset(
+          queueIndex: queueIndex,
+          globalOffset: dragOffset,
+        );
+  }
+
+  Offset _captureDragFeedbackAnchor(
+    BuildContext context,
+    Offset globalPosition,
+  ) {
+    final renderObject = context.findRenderObject();
+    if (renderObject is! RenderBox) {
+      _dragFeedbackAnchorOffset = Offset.zero;
+      return Offset.zero;
+    }
+    _dragFeedbackAnchorOffset = renderObject.globalToLocal(globalPosition);
+    return _dragFeedbackAnchorOffset;
+  }
+
+  void _handleDragPointerUpdate(int queueIndex, Offset dragOffset) {
+    final globalPosition = _pointerGlobalFromDragOffset(dragOffset);
+    _dragPointerGlobalPosition = globalPosition;
+    final preview = _previewForDragOffset(
+      queueIndex: queueIndex,
+      dragOffset: dragOffset,
+    );
+    if (preview == null) {
+      return;
+    }
+
+    _setDragIsOverBoard(true);
+    _flameGame.setPreview(
+      preview.shape,
+      preview.originX,
+      preview.originY,
+      isValid: preview.isValid,
+    );
+  }
+
+  void _handleDragTargetLeave() {
+    final globalPosition = _dragPointerGlobalPosition;
+    if (globalPosition != null && _isGlobalPointInsideBoard(globalPosition)) {
+      return;
+    }
+    _setDragIsOverBoard(false);
+    _flameGame.clearPreview();
+  }
+
+  void _showInvalidDropFeedback() {
+    unawaited(_haptics.onInvalidPlacement());
+    unawaited(_audio.onInvalidPlacement());
+    _shakeController.forward(from: 0);
+    _pushFlyout('DROP ON BOARD', const Color(0xFFFF3B30));
+  }
+
+  Future<void> _acceptDraggedBlock(DragTargetDetails<int> details) async {
+    final preview = _previewForDragOffset(
+      queueIndex: details.data,
+      dragOffset: details.offset,
+    );
+    _setDragIsOverBoard(false);
+    _dragPointerGlobalPosition = null;
+    _dragFeedbackAnchorOffset = Offset.zero;
+    _flameGame.clearPreview();
+
+    if (preview == null) {
+      _clearDragState();
+      _showInvalidDropFeedback();
+      return;
+    }
+
+    setState(() {
+      _draggingQueueIndex = null;
+      _session = _session.selectQueueIndex(details.data);
+    });
+    await _tapCell(preview.originX, preview.originY);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -628,64 +894,10 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
         child: SafeArea(
           child: DragTarget<int>(
             onWillAcceptWithDetails: (_) => !_session.isGameOver,
-            onMove: (details) {
-              final RenderBox? boardBox = _boardKey.currentContext?.findRenderObject() as RenderBox?;
-              if (boardBox == null) return;
-              
-              final localOffset = boardBox.globalToLocal(details.offset);
-              final n = _session.board.size;
-              final side = boardBox.size.width;
-              final cellW = side / n;
-              final cellH = side / n;
-              
-              final shape = _session.queue.items[details.data];
-              int minX = 99, maxX = -99, minY = 99, maxY = -99;
-              for (final c in shape.cells) {
-                if (c.dx < minX) minX = c.dx;
-                if (c.dx > maxX) maxX = c.dx;
-                if (c.dy < minY) minY = c.dy;
-                if (c.dy > maxY) maxY = c.dy;
-              }
-              final shapeW = maxX - minX + 1;
-              final shapeH = maxY - minY + 1;
-              
-              final originX = (localOffset.dx / cellW).floor() - (shapeW ~/ 2);
-              final originY = ((localOffset.dy - 80) / cellH).floor() - (shapeH ~/ 2);
-              
-              _flameGame.setPreview(shape, originX, originY);
-            },
-            onLeave: (_) {
-              _flameGame.clearPreview();
-            },
-            onAcceptWithDetails: (details) async {
-              _flameGame.clearPreview();
-              final RenderBox? boardBox = _boardKey.currentContext?.findRenderObject() as RenderBox?;
-              if (boardBox == null) return;
-              
-              final localOffset = boardBox.globalToLocal(details.offset);
-              final n = _session.board.size;
-              final side = boardBox.size.width;
-              final cellW = side / n;
-              final cellH = side / n;
-              
-              final shape = _session.queue.items[details.data];
-              int minX = 99, maxX = -99, minY = 99, maxY = -99;
-              for (final c in shape.cells) {
-                if (c.dx < minX) minX = c.dx;
-                if (c.dx > maxX) maxX = c.dx;
-                if (c.dy < minY) minY = c.dy;
-                if (c.dy > maxY) maxY = c.dy;
-              }
-              final shapeW = maxX - minX + 1;
-              final shapeH = maxY - minY + 1;
-              
-              final originX = (localOffset.dx / cellW).floor() - (shapeW ~/ 2);
-              final originY = ((localOffset.dy - 80) / cellH).floor() - (shapeH ~/ 2);
-              
-              setState(() {
-                _session = _session.selectQueueIndex(details.data);
-              });
-              unawaited(_tapCell(originX, originY));
+            onMove: _updateDragPreview,
+            onLeave: (_) => _handleDragTargetLeave(),
+            onAcceptWithDetails: (details) {
+              unawaited(_acceptDraggedBlock(details));
             },
             builder: (context, candidateData, rejectedData) => Padding(
               padding: const EdgeInsets.fromLTRB(4, 10, 4, 10),
@@ -698,7 +910,9 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const SizedBox(width: 48), // Padding equivalent to IconButton
+                          const SizedBox(
+                            width: 48,
+                          ), // Padding equivalent to IconButton
                           Expanded(
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
@@ -725,95 +939,92 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
                               unawaited(_audio.onUiTap());
                               _showPauseSheet();
                             },
-                            icon: const Icon(Icons.pause_rounded, color: Colors.white),
+                            icon: const Icon(
+                              Icons.pause_rounded,
+                              color: Colors.white,
+                            ),
                           ),
                         ],
                       ),
-                    const SizedBox(height: 8),
-                    if (_comboMessage != null) _buildComboBanner(),
-                    Expanded(
-                      child: AnimatedBuilder(
-                        animation: Listenable.merge(<Listenable>[_shakeController, _boardPulseController]),
-                        builder: (context, child) {
-                          final pulse = math.sin(_boardPulseController.value * math.pi);
-                          final bump = 1 + 0.02 * pulse * _boardPulseController.value;
-                          return Transform.translate(
-                            offset: Offset(_shakeTween.value, 0),
-                            child: Transform.scale(
-                              scale: bump,
-                              alignment: Alignment.center,
-                              child: child,
-                            ),
-                          );
-                        },
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            final side = math.min(constraints.maxWidth, constraints.maxHeight);
-                            return Center(
-                                  child: Container(
-                                    key: _boardKey,
-                                    width: side,
-                                    height: side,
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(24),
-                                      color: const Color(0x44091A2E),
-                                      border: Border.all(
-                                        color: ArcadeShellTheme.glowCyan.withValues(alpha: 0.22),
-                                        width: 1,
-                                      ),
-                                      boxShadow: [
-                                        const BoxShadow(
-                                          color: Color(0x22000000),
-                                          blurRadius: 20,
-                                          offset: Offset(0, 10),
-                                        ),
-                                        BoxShadow(
-                                          color: ArcadeShellTheme.premiumPurple.withValues(alpha: 0.18),
-                                          blurRadius: 28,
-                                          offset: const Offset(0, 8),
-                                        ),
-                                      ],
-                                    ),
-                                    child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(24),
-                                      child: GameWidget<Stage2FlameGame>(
-                                        game: _flameGame,
-                                      ),
-                                    ),
-                                  ),
+                      const SizedBox(height: 8),
+                      if (_comboMessage != null) _buildComboBanner(),
+                      Expanded(
+                        child: AnimatedBuilder(
+                          animation: Listenable.merge(<Listenable>[
+                            _shakeController,
+                            _boardPulseController,
+                          ]),
+                          builder: (context, child) {
+                            final pulse = math.sin(
+                              _boardPulseController.value * math.pi,
+                            );
+                            final bump =
+                                1 + 0.02 * pulse * _boardPulseController.value;
+                            return Transform.translate(
+                              offset: Offset(_shakeTween.value, 0),
+                              child: Transform.scale(
+                                scale: bump,
+                                alignment: Alignment.center,
+                                child: child,
+                              ),
                             );
                           },
+                          child: LayoutBuilder(
+                            builder: (context, constraints) {
+                              final side = math.min(
+                                constraints.maxWidth,
+                                constraints.maxHeight,
+                              );
+                              return Center(
+                                child: SizedBox(
+                                  key: _boardKey,
+                                  width: side,
+                                  height: side,
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(22),
+                                    child: GameWidget<Stage2FlameGame>(
+                                      game: _flameGame,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    _buildBlockTray(context),
-                    if (_session.isGameOver) ...[
                       const SizedBox(height: 8),
-                      _buildGameOverPanel(context),
-                    ],
-                  ],
-                ),
-                Positioned(
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  child: IgnorePointer(
-                    child: Column(
-                      children: <Widget>[
-                        for (final f in _flyouts) _FloatingFlyoutLabel(key: ValueKey<String>(f.id), item: f),
+                      _buildBlockTray(context),
+                      if (_session.isGameOver) ...[
+                        const SizedBox(height: 8),
+                        _buildGameOverPanel(context),
                       ],
+                    ],
+                  ),
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: IgnorePointer(
+                      child: Column(
+                        children: <Widget>[
+                          for (final f in _flyouts)
+                            _FloatingFlyoutLabel(
+                              key: ValueKey<String>(f.id),
+                              item: f,
+                            ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
       ),
-    ),
-  );
-}
+    );
+  }
+
   Widget _buildCompactHud(BuildContext context) {
     return AnimatedBuilder(
       animation: _scoreBumpController,
@@ -836,9 +1047,19 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
               height: 1.0,
               letterSpacing: 3.0,
               shadows: [
-                Shadow(color: ArcadeShellTheme.glowCyan.withValues(alpha: 0.8), blurRadius: 20),
-                Shadow(color: ArcadeShellTheme.neonPink.withValues(alpha: 0.4), blurRadius: 40),
-                const Shadow(color: Color(0x88000000), blurRadius: 10, offset: Offset(0, 4)),
+                Shadow(
+                  color: ArcadeShellTheme.glowCyan.withValues(alpha: 0.8),
+                  blurRadius: 20,
+                ),
+                Shadow(
+                  color: ArcadeShellTheme.neonPink.withValues(alpha: 0.4),
+                  blurRadius: 40,
+                ),
+                const Shadow(
+                  color: Color(0x88000000),
+                  blurRadius: 10,
+                  offset: Offset(0, 4),
+                ),
               ],
             ),
           ),
@@ -854,10 +1075,7 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
       builder: (context, child) {
         final t = Curves.elasticOut.transform(_comboPopController.value);
         final scale = (0.6 + 0.55 * t).clamp(0.0, 1.35);
-        return Transform.scale(
-          scale: scale,
-          child: child,
-        );
+        return Transform.scale(scale: scale, child: child);
       },
       child: Container(
         margin: const EdgeInsets.only(bottom: 8),
@@ -914,63 +1132,135 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
               ),
             ],
           ),
-          child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: List<Widget>.generate(
-            _session.queue.items.length,
-            (index) {
-              final shape = _session.queue.items[index];
-              final selected = _session.selectedQueueIndex == index;
-              final child = _BlockTraySlot(
-                shape: shape,
-                color: Stage2FlameGame.blockColors[shape.colorType] ?? Colors.grey,
-                selected: selected,
-                enabled: !_session.isGameOver,
-                onTap: () {
-                  unawaited(_haptics.onTraySelect());
-                  unawaited(_audio.onTraySelect());
-                  unawaited(_audio.onDragTick());
-                  setState(() {
-                    _session = _session.selectQueueIndex(index);
-                  });
-                  _syncFlameBoard();
-                },
-              );
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Drag blocks onto the board',
+                style: GoogleFonts.orbitron(
+                  color: Colors.white.withValues(alpha: 0.62),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.2,
+                ),
+              ),
+              const SizedBox(height: 8),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List<Widget>.generate(_session.queue.items.length, (
+                    index,
+                  ) {
+                    final shape = _session.queue.items[index];
+                    final selected = _session.selectedQueueIndex == index;
+                    final isDragging = _draggingQueueIndex == index;
+                    final child = _BlockTraySlot(
+                      shape: shape,
+                      color:
+                          Stage2FlameGame.blockColors[shape.colorType] ??
+                          Colors.grey,
+                      selected: selected && _draggingQueueIndex == null,
+                      dragging: isDragging,
+                      enabled: !_session.isGameOver,
+                      onTap: () {
+                        unawaited(_haptics.onTraySelect());
+                        unawaited(_audio.onTraySelect());
+                        setState(() {
+                          _session = _session.selectQueueIndex(index);
+                        });
+                        _syncFlameBoard();
+                      },
+                    );
 
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                child: _session.isGameOver
-                    ? child
-                    : Draggable<int>(
-                        data: index,
-                        dragAnchorStrategy: pointerDragAnchorStrategy,
-                        feedback: Transform.translate(
-                          offset: const Offset(-30, -100),
-                          child: Transform.scale(
-                            scale: 1.15,
-                            child: _BlockTraySlot(
-                              shape: shape,
-                              color: Stage2FlameGame.blockColors[shape.colorType] ?? Colors.grey,
-                              selected: true,
-                              enabled: true,
-                              onTap: () {},
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: _session.isGameOver
+                          ? child
+                          : Draggable<int>(
+                              data: index,
+                              dragAnchorStrategy:
+                                  (draggable, context, position) =>
+                                      _captureDragFeedbackAnchor(
+                                        context,
+                                        position,
+                                      ),
+                              feedback: Material(
+                                type: MaterialType.transparency,
+                                child: ValueListenableBuilder<bool>(
+                                  valueListenable: _dragIsOverBoard,
+                                  builder: (context, isOverBoard, child) {
+                                    return Opacity(
+                                      key: ValueKey<String>(
+                                        'block-tray-drag-feedback-$index',
+                                      ),
+                                      opacity: isOverBoard ? 0.0 : 1.0,
+                                      child: child,
+                                    );
+                                  },
+                                  child: Transform.scale(
+                                    scale: 1.22,
+                                    child: _BlockTraySlot(
+                                      shape: shape,
+                                      color:
+                                          Stage2FlameGame.blockColors[shape
+                                              .colorType] ??
+                                          Colors.grey,
+                                      selected: true,
+                                      dragging: true,
+                                      enabled: true,
+                                      onTap: () {},
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              onDragStarted: () {
+                                unawaited(_haptics.onTraySelect());
+                                unawaited(_audio.onTraySelect());
+                                unawaited(_audio.onDragTick());
+                                _dragPointerGlobalPosition = null;
+                                _setDragIsOverBoard(false);
+                                setState(() {
+                                  _draggingQueueIndex = index;
+                                  _session = _session.selectQueueIndex(index);
+                                });
+                                _syncFlameBoard();
+                              },
+                              onDragUpdate: (details) {
+                                _handleDragPointerUpdate(
+                                  index,
+                                  details.globalPosition,
+                                );
+                              },
+                              onDraggableCanceled: (_, _) {
+                                _clearDragState();
+                              },
+                              onDragEnd: (_) {
+                                _setDragIsOverBoard(false);
+                                _dragPointerGlobalPosition = null;
+                                _dragFeedbackAnchorOffset = Offset.zero;
+                                _flameGame.clearPreview();
+                                if (mounted && _draggingQueueIndex != null) {
+                                  setState(() {
+                                    _draggingQueueIndex = null;
+                                  });
+                                }
+                              },
+                              childWhenDragging: Opacity(
+                                opacity: 0.22,
+                                child: child,
+                              ),
+                              child: child,
                             ),
-                          ),
-                        ),
-                        childWhenDragging: Opacity(
-                          opacity: 0.1,
-                          child: child,
-                        ),
-                        child: child,
-                      ),
-              );
-            },
+                    );
+                  }),
+                ),
+              ),
+            ],
           ),
         ),
       ),
-    )));
+    );
   }
 
   Widget _buildGameOverPanel(BuildContext context) {
@@ -987,7 +1277,10 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
             const Color(0xFF0D1528).withValues(alpha: 0.97),
           ],
         ),
-        border: Border.all(color: ArcadeShellTheme.glowCyan.withValues(alpha: 0.35), width: 1.2),
+        border: Border.all(
+          color: ArcadeShellTheme.glowCyan.withValues(alpha: 0.35),
+          width: 1.2,
+        ),
         boxShadow: [
           const BoxShadow(
             color: Color(0x55000000),
@@ -1004,17 +1297,17 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-        const Text(
-          'GAME OVER',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: ink,
-            fontFamily: 'Orbitron',
-            fontWeight: FontWeight.w900,
-            fontSize: 26,
-            letterSpacing: 3,
+          const Text(
+            'GAME OVER',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: ink,
+              fontFamily: 'Orbitron',
+              fontWeight: FontWeight.w900,
+              fontSize: 26,
+              letterSpacing: 3,
+            ),
           ),
-        ),
           const SizedBox(height: 2),
           Text(
             'No valid moves remain.',
@@ -1031,8 +1324,15 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
               fontSize: 44,
               height: 1.0,
               shadows: [
-                Shadow(color: ArcadeShellTheme.neonPink.withValues(alpha: 0.5), blurRadius: 20),
-                const Shadow(color: Color(0x88000000), blurRadius: 6, offset: Offset(0, 3)),
+                Shadow(
+                  color: ArcadeShellTheme.neonPink.withValues(alpha: 0.5),
+                  blurRadius: 20,
+                ),
+                const Shadow(
+                  color: Color(0x88000000),
+                  blurRadius: 6,
+                  offset: Offset(0, 3),
+                ),
               ],
             ),
           ),
@@ -1060,13 +1360,22 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
                   onPressed: _continueLoading ? null : _onContinueRewardedTap,
                   style: OutlinedButton.styleFrom(
                     foregroundColor: ArcadeShellTheme.glowCyan,
-                    side: BorderSide(color: ArcadeShellTheme.glowCyan.withValues(alpha: 0.7), width: 1.5),
+                    side: BorderSide(
+                      color: ArcadeShellTheme.glowCyan.withValues(alpha: 0.7),
+                      width: 1.5,
+                    ),
                     padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
                   ),
                   child: Text(
                     _continueLoading ? 'LOADING...' : 'CONTINUE',
-                    style: GoogleFonts.orbitron(fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                    style: GoogleFonts.orbitron(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.2,
+                    ),
                   ),
                 ),
               ),
@@ -1078,13 +1387,21 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
                     backgroundColor: ArcadeShellTheme.neonPink,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
                     elevation: 8,
-                    shadowColor: ArcadeShellTheme.neonPink.withValues(alpha: 0.5),
+                    shadowColor: ArcadeShellTheme.neonPink.withValues(
+                      alpha: 0.5,
+                    ),
                   ),
                   child: Text(
                     'END RUN',
-                    style: GoogleFonts.orbitron(fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                    style: GoogleFonts.orbitron(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.2,
+                    ),
                   ),
                 ),
               ),
@@ -1097,11 +1414,45 @@ class _Stage2BoardScreenState extends State<Stage2BoardScreen> with TickerProvid
 }
 
 class _FlyoutItem {
-  const _FlyoutItem({required this.id, required this.text, required this.color});
+  const _FlyoutItem({
+    required this.id,
+    required this.text,
+    required this.color,
+  });
 
   final String id;
   final String text;
   final Color color;
+}
+
+class _BoardDropPreview {
+  const _BoardDropPreview({
+    required this.queueIndex,
+    required this.shape,
+    required this.originX,
+    required this.originY,
+    required this.isValid,
+  });
+
+  final int queueIndex;
+  final BlockShape shape;
+  final int originX;
+  final int originY;
+  final bool isValid;
+}
+
+class _ShapeBounds {
+  const _ShapeBounds({
+    required this.minX,
+    required this.maxX,
+    required this.minY,
+    required this.maxY,
+  });
+
+  final int minX;
+  final int maxX;
+  final int minY;
+  final int maxY;
 }
 
 class _FloatingFlyoutLabel extends StatelessWidget {
@@ -1156,6 +1507,7 @@ class _BlockTraySlot extends StatelessWidget {
     required this.shape,
     required this.color,
     required this.selected,
+    required this.dragging,
     required this.enabled,
     required this.onTap,
   });
@@ -1163,6 +1515,7 @@ class _BlockTraySlot extends StatelessWidget {
   final BlockShape shape;
   final Color color;
   final bool selected;
+  final bool dragging;
   final bool enabled;
   final VoidCallback onTap;
 
@@ -1171,7 +1524,7 @@ class _BlockTraySlot extends StatelessWidget {
     return GestureDetector(
       onTap: enabled ? onTap : null,
       child: AnimatedScale(
-        scale: selected ? 1.15 : 1.0,
+        scale: dragging ? 1.08 : (selected ? 1.06 : 1.0),
         duration: const Duration(milliseconds: 200),
         curve: Curves.elasticOut,
         child: Container(
@@ -1179,8 +1532,26 @@ class _BlockTraySlot extends StatelessWidget {
           height: 86,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(18),
-            color: selected ? const Color(0x33FFFFFF) : Colors.transparent,
-            border: selected ? Border.all(color: Colors.white, width: 2) : Border.all(color: Colors.transparent, width: 2),
+            color: dragging
+                ? const Color(0x26FFFFFF)
+                : (selected ? const Color(0x18FFFFFF) : Colors.transparent),
+            border: Border.all(
+              color: dragging
+                  ? ArcadeShellTheme.glowCyan.withValues(alpha: 0.9)
+                  : (selected
+                        ? Colors.white.withValues(alpha: 0.55)
+                        : Colors.transparent),
+              width: dragging ? 2.4 : 1.4,
+            ),
+            boxShadow: dragging
+                ? [
+                    BoxShadow(
+                      color: ArcadeShellTheme.glowCyan.withValues(alpha: 0.34),
+                      blurRadius: 18,
+                      spreadRadius: -2,
+                    ),
+                  ]
+                : null,
           ),
           child: Center(
             child: _MiniShapePreview(cells: shape.cells, color: color),
@@ -1232,9 +1603,16 @@ class _MiniShapePreview extends StatelessWidget {
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(4),
                   color: color,
-                  border: Border.all(color: Colors.white.withValues(alpha: 0.2), width: 1.5),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.2),
+                    width: 1.5,
+                  ),
                   boxShadow: const [
-                    BoxShadow(color: Color(0x33000000), blurRadius: 2, offset: Offset(1, 1)),
+                    BoxShadow(
+                      color: Color(0x33000000),
+                      blurRadius: 2,
+                      offset: Offset(1, 1),
+                    ),
                   ],
                 ),
               ),

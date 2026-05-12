@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:blocknova_app/game_core/block_queue.dart';
 import 'package:blocknova_app/game_core/block_shape.dart';
 import 'package:blocknova_app/game_core/board_state.dart';
@@ -46,7 +48,11 @@ void main() {
     var session = GameSession(
       board: _emptyBoardSession().board,
       queue: const BlockQueue([
-        BlockShape(colorType: BlockColorType.purple, id: 'single', cells: [GridPoint(0, 0)]),
+        BlockShape(
+          colorType: BlockColorType.purple,
+          id: 'single',
+          cells: [GridPoint(0, 0)],
+        ),
       ]),
       selectedQueueIndex: 0,
       isGameOver: false,
@@ -58,7 +64,11 @@ void main() {
       session = GameSession(
         board: place.session.board,
         queue: const BlockQueue([
-          BlockShape(colorType: BlockColorType.purple, id: 'single', cells: [GridPoint(0, 0)]),
+          BlockShape(
+            colorType: BlockColorType.purple,
+            id: 'single',
+            cells: [GridPoint(0, 0)],
+          ),
         ]),
         selectedQueueIndex: 0,
         isGameOver: false,
@@ -94,7 +104,11 @@ void main() {
     final continueSession = GameSession(
       board: firstClear.session.board,
       queue: const BlockQueue([
-        BlockShape(colorType: BlockColorType.purple, id: 'single', cells: [GridPoint(0, 0)]),
+        BlockShape(
+          colorType: BlockColorType.purple,
+          id: 'single',
+          cells: [GridPoint(0, 0)],
+        ),
       ]),
       selectedQueueIndex: 0,
       isGameOver: false,
@@ -112,7 +126,11 @@ void main() {
     final nonClear = GameSession(
       board: secondClear.session.board,
       queue: const BlockQueue([
-        BlockShape(colorType: BlockColorType.purple, id: 'single', cells: [GridPoint(0, 0)]),
+        BlockShape(
+          colorType: BlockColorType.purple,
+          id: 'single',
+          cells: [GridPoint(0, 0)],
+        ),
       ]),
       selectedQueueIndex: 0,
       isGameOver: false,
@@ -156,9 +174,13 @@ void main() {
       }
     }
     final blockedSession = GameSession(
-      board: BoardState(size: size, cellColors: { for (var k in occupied) k: BlockColorType.purple }),
+      board: BoardState(
+        size: size,
+        cellColors: {for (var k in occupied) k: BlockColorType.purple},
+      ),
       queue: const BlockQueue([
-        BlockShape(colorType: BlockColorType.purple, 
+        BlockShape(
+          colorType: BlockColorType.purple,
           id: 'domino_h',
           cells: [GridPoint(0, 0), GridPoint(1, 0)],
         ),
@@ -173,15 +195,126 @@ void main() {
     final failed = blockedSession.placeSelectedAt(7, 7);
     expect(failed.accepted, isFalse);
   });
+
+  test('Successful final placement can mark session game over', () {
+    final session = GameSession(
+      board: _checkerboardBlockedBoard(),
+      queue: const BlockQueue([
+        BlockShape(
+          colorType: BlockColorType.purple,
+          id: 'single',
+          cells: [GridPoint(0, 0)],
+        ),
+        BlockShape(
+          colorType: BlockColorType.yellow,
+          id: 'square_3x3',
+          cells: [
+            GridPoint(0, 0),
+            GridPoint(1, 0),
+            GridPoint(2, 0),
+            GridPoint(0, 1),
+            GridPoint(1, 1),
+            GridPoint(2, 1),
+            GridPoint(0, 2),
+            GridPoint(1, 2),
+            GridPoint(2, 2),
+          ],
+        ),
+      ]),
+      selectedQueueIndex: 0,
+    );
+
+    final result = session.placeSelectedAt(1, 0);
+
+    expect(result.accepted, isTrue);
+    expect(result.session.isGameOver, isTrue);
+    expect(result.session.hasAnyValidMove(), isFalse);
+  });
+
+  test('Placement after game over is rejected with game_over reason', () {
+    final gameOverSession = GameSession(
+      board: _checkerboardBlockedBoard(),
+      queue: const BlockQueue([
+        BlockShape(
+          colorType: BlockColorType.yellow,
+          id: 'square_3x3',
+          cells: [
+            GridPoint(0, 0),
+            GridPoint(1, 0),
+            GridPoint(2, 0),
+            GridPoint(0, 1),
+            GridPoint(1, 1),
+            GridPoint(2, 1),
+            GridPoint(0, 2),
+            GridPoint(1, 2),
+            GridPoint(2, 2),
+          ],
+        ),
+      ]),
+      isGameOver: true,
+    );
+
+    final result = gameOverSession.placeSelectedAt(0, 0);
+
+    expect(result.accepted, isFalse);
+    expect(result.reason, 'game_over');
+    expect(result.session, same(gameOverSession));
+  });
+
+  test('Rewarded recovery returns a playable non-game-over session', () {
+    final gameOverSession = GameSession(
+      board: _checkerboardBlockedBoard(),
+      queue: const BlockQueue([
+        BlockShape(
+          colorType: BlockColorType.yellow,
+          id: 'square_3x3',
+          cells: [
+            GridPoint(0, 0),
+            GridPoint(1, 0),
+            GridPoint(2, 0),
+            GridPoint(0, 1),
+            GridPoint(1, 1),
+            GridPoint(2, 1),
+            GridPoint(0, 2),
+            GridPoint(1, 2),
+            GridPoint(2, 2),
+          ],
+        ),
+      ]),
+      isGameOver: true,
+    );
+
+    final recovered = gameOverSession.withRecoveryQueue(Random(12));
+
+    expect(recovered.isGameOver, isFalse);
+    expect(recovered.hasAnyValidMove(), isTrue);
+  });
 }
 
 GameSession _emptyBoardSession() => GameSession.stage2Start();
+
+BoardState _checkerboardBlockedBoard() {
+  final occupied = <int, BlockColorType>{};
+  const size = 8;
+  for (var y = 0; y < size; y++) {
+    for (var x = 0; x < size; x++) {
+      if ((x + y).isEven) {
+        occupied[y * size + x] = BlockColorType.purple;
+      }
+    }
+  }
+  return BoardState(size: size, cellColors: occupied);
+}
 
 GameSession _boardWithAlmostCompleteRow(int rowY) {
   var session = GameSession(
     board: _emptyBoardSession().board,
     queue: const BlockQueue([
-      BlockShape(colorType: BlockColorType.purple, id: 'single', cells: [GridPoint(0, 0)]),
+      BlockShape(
+        colorType: BlockColorType.purple,
+        id: 'single',
+        cells: [GridPoint(0, 0)],
+      ),
     ]),
     selectedQueueIndex: 0,
     isGameOver: false,
@@ -194,7 +327,11 @@ GameSession _boardWithAlmostCompleteRow(int rowY) {
     session = GameSession(
       board: result.session.board,
       queue: const BlockQueue([
-        BlockShape(colorType: BlockColorType.purple, id: 'single', cells: [GridPoint(0, 0)]),
+        BlockShape(
+          colorType: BlockColorType.purple,
+          id: 'single',
+          cells: [GridPoint(0, 0)],
+        ),
       ]),
       selectedQueueIndex: 0,
       isGameOver: false,
@@ -218,7 +355,11 @@ GameSession _boardWithTwoAlmostCompleteRows() {
     session = GameSession(
       board: res.session.board,
       queue: const BlockQueue([
-        BlockShape(colorType: BlockColorType.purple, id: 'single', cells: [GridPoint(0, 0)]),
+        BlockShape(
+          colorType: BlockColorType.purple,
+          id: 'single',
+          cells: [GridPoint(0, 0)],
+        ),
       ]),
       selectedQueueIndex: 0,
       isGameOver: false,

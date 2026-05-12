@@ -13,6 +13,8 @@ void main() {
     expect(a.isDanger, isFalse);
     expect(a.shapesWithAnyPlacement, kShapePool.length);
     expect(a.totalLegalPlacements, greaterThan(500));
+    expect(a.largestEmptyRegion, 64);
+    expect(a.disconnectedEmptyCells, 0);
   });
 
   test('Almost-full board is danger and single still fits one hole', () {
@@ -36,6 +38,34 @@ void main() {
       colorType: BlockColorType.purple,
     );
     expect(BoardAnalysis.legalPlacementCount(board, single), 1);
+  });
+
+  test('Fragmented board reports empty cells outside largest region', () {
+    final occupied = <int, BlockColorType>{};
+    const size = 8;
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        occupied[y * size + x] = BlockColorType.blue;
+      }
+    }
+
+    for (final point in [
+      const GridPoint(0, 0),
+      const GridPoint(1, 0),
+      const GridPoint(0, 1),
+      const GridPoint(7, 7),
+      const GridPoint(5, 5),
+    ]) {
+      occupied.remove(point.dy * size + point.dx);
+    }
+
+    final a = BoardAnalysis.fromBoard(
+      BoardState(size: size, cellColors: occupied),
+    );
+
+    expect(a.emptyCells, 5);
+    expect(a.largestEmptyRegion, 3);
+    expect(a.disconnectedEmptyCells, 2);
   });
 
   test('usableShapeCount counts queue slots with at least one placement', () {

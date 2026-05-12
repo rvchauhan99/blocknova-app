@@ -9,6 +9,7 @@ class BoardAnalysis {
     required this.nearFullRowCount,
     required this.nearFullColCount,
     required this.fragmentedHoleScore,
+    required this.largestEmptyRegion,
     required this.totalLegalPlacements,
     required this.shapesWithAnyPlacement,
     required this.isDanger,
@@ -28,6 +29,12 @@ class BoardAnalysis {
 
   /// Higher when empty cells are poorly connected (rough fragmentation proxy).
   final int fragmentedHoleScore;
+
+  /// Largest 4-way connected group of empty cells.
+  final int largestEmptyRegion;
+
+  /// Empty cells outside the largest connected group.
+  int get disconnectedEmptyCells => emptyCells - largestEmptyRegion;
 
   /// Sum over [kShapePool] of legal placement counts (can be large; used relatively).
   final int totalLegalPlacements;
@@ -75,6 +82,8 @@ class BoardAnalysis {
     }
 
     var frag = 0;
+    final visited = <int>{};
+    var largestRegion = 0;
     const neighDx = <int>[1, -1, 0, 0];
     const neighDy = <int>[0, 0, 1, -1];
     for (var y = 0; y < size; y++) {
@@ -95,6 +104,37 @@ class BoardAnalysis {
         }
         if (emptyNeigh <= 1) {
           frag++;
+        }
+
+        final start = board.keyFor(x, y);
+        if (visited.contains(start)) {
+          continue;
+        }
+        var region = 0;
+        final pending = <int>[start];
+        visited.add(start);
+        while (pending.isNotEmpty) {
+          final key = pending.removeLast();
+          region++;
+          final cx = key % size;
+          final cy = key ~/ size;
+          for (var i = 0; i < 4; i++) {
+            final nx = cx + neighDx[i];
+            final ny = cy + neighDy[i];
+            if (nx < 0 || ny < 0 || nx >= size || ny >= size) {
+              continue;
+            }
+            if (board.isOccupied(nx, ny)) {
+              continue;
+            }
+            final next = board.keyFor(nx, ny);
+            if (visited.add(next)) {
+              pending.add(next);
+            }
+          }
+        }
+        if (region > largestRegion) {
+          largestRegion = region;
         }
       }
     }
@@ -118,6 +158,7 @@ class BoardAnalysis {
       nearFullRowCount: nearRows,
       nearFullColCount: nearCols,
       fragmentedHoleScore: frag,
+      largestEmptyRegion: largestRegion,
       totalLegalPlacements: totalPlacements,
       shapesWithAnyPlacement: shapesOk,
       isDanger: danger,

@@ -12,6 +12,26 @@ import 'package:flutter_test/flutter_test.dart';
 int _singleCount(List<BlockShape> items) =>
     items.where((s) => s.id == 'single').length;
 
+bool _hasLineClearOption(BoardState board, List<BlockShape> items) {
+  for (final shape in items) {
+    for (var y = 0; y < board.size; y++) {
+      for (var x = 0; x < board.size; x++) {
+        if (!board.canPlace(shape: shape, originX: x, originY: y)) {
+          continue;
+        }
+        final clears = board
+            .place(shape: shape, originX: x, originY: y)
+            .clearCompletedLines()
+            .clearedLineCount;
+        if (clears > 0) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 void main() {
   test('dealQueue uses at most one single per tray (Monte Carlo)', () {
     const board = BoardState(size: 8);
@@ -71,6 +91,47 @@ void main() {
     }
   });
 
+  test('Opening trays include a useful small/medium mix', () {
+    const board = BoardState(size: 8);
+    for (var seed = 0; seed < 120; seed++) {
+      final q = BlockSpawnPolicy.dealQueue(
+        board: board,
+        rng: Random(seed),
+        queueRefillCount: 0,
+      );
+
+      expect(q.items.any((s) => s.tileCount <= 3), isTrue);
+      expect(q.items.any((s) => s.tileCount >= 3 && s.tileCount <= 4), isTrue);
+      expect(q.items.every((s) => s.tileCount <= 2), isFalse);
+    }
+  });
+
+  test('Mid board trays avoid all-tiny hands and remain playable', () {
+    final occupied = <int, BlockColorType>{};
+    const size = 8;
+    for (var y = 0; y < 3; y++) {
+      for (var x = 0; x < size; x++) {
+        occupied[y * size + x] = BlockColorType.cyan;
+      }
+    }
+    final board = BoardState(size: size, cellColors: occupied);
+
+    for (var seed = 0; seed < 100; seed++) {
+      final q = BlockSpawnPolicy.dealQueue(
+        board: board,
+        rng: Random(seed),
+        queueRefillCount: 4,
+      );
+
+      expect(BoardAnalysis.queueHasAnyLegalMove(board, q.items), isTrue);
+      expect(
+        BoardAnalysis.usableShapeCount(board, q.items),
+        greaterThanOrEqualTo(2),
+      );
+      expect(q.items.every((s) => s.tileCount <= 3), isFalse);
+    }
+  });
+
   test('Danger board forces a small shape and not all-large hand', () {
     final occupied = <int, BlockColorType>{};
     const size = 8;
@@ -119,6 +180,61 @@ void main() {
         BoardAnalysis.usableShapeCount(board, q.items),
         greaterThanOrEqualTo(2),
       );
+    }
+  });
+
+  test('Fragmented danger board receives compact recovery-biased shapes', () {
+    final occupied = <int, BlockColorType>{};
+    const size = 8;
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        occupied[y * size + x] = BlockColorType.purple;
+      }
+    }
+    for (final point in [
+      const GridPoint(0, 0),
+      const GridPoint(1, 0),
+      const GridPoint(6, 1),
+      const GridPoint(2, 4),
+      const GridPoint(7, 7),
+    ]) {
+      occupied.remove(point.dy * size + point.dx);
+    }
+    final board = BoardState(size: size, cellColors: occupied);
+    expect(
+      BoardAnalysis.fromBoard(board).disconnectedEmptyCells,
+      greaterThan(0),
+    );
+
+    for (var seed = 0; seed < 80; seed++) {
+      final q = BlockSpawnPolicy.dealQueue(
+        board: board,
+        rng: Random(seed),
+        queueRefillCount: 8,
+      );
+
+      expect(BoardAnalysis.queueHasAnyLegalMove(board, q.items), isTrue);
+      expect(q.items.any((s) => s.tileCount <= 3), isTrue);
+      expect(q.items.where((s) => s.tileCount >= 5).length, lessThan(2));
+    }
+  });
+
+  test('Near-clear board offers at least one line-clear option', () {
+    final occupied = <int, BlockColorType>{};
+    const size = 8;
+    for (var x = 0; x < size - 1; x++) {
+      occupied[x] = BlockColorType.green;
+    }
+    final board = BoardState(size: size, cellColors: occupied);
+
+    for (var seed = 0; seed < 80; seed++) {
+      final q = BlockSpawnPolicy.dealQueue(
+        board: board,
+        rng: Random(seed),
+        queueRefillCount: 4,
+      );
+
+      expect(_hasLineClearOption(board, q.items), isTrue);
     }
   });
 
@@ -197,22 +313,25 @@ void main() {
     }
   });
 
-  test('dealRecoveryQueue uses at most one single when board is not danger', () {
-    final cells = <int, BlockColorType>{};
-    for (var i = 0; i < 10; i++) {
-      cells[(i * 6) % 64] = BlockColorType.cyan;
-    }
-    final board = BoardState(size: 8, cellColors: cells);
-    expect(BoardAnalysis.fromBoard(board).isDanger, isFalse);
-    for (var seed = 0; seed < 80; seed++) {
-      final q = BlockSpawnPolicy.dealRecoveryQueue(
-        board: board,
-        rng: Random(seed),
-      );
-      expect(_singleCount(q.items), lessThanOrEqualTo(1));
-      expect(BoardAnalysis.queueHasAnyLegalMove(board, q.items), isTrue);
-    }
-  });
+  test(
+    'dealRecoveryQueue uses at most one single when board is not danger',
+    () {
+      final cells = <int, BlockColorType>{};
+      for (var i = 0; i < 10; i++) {
+        cells[(i * 6) % 64] = BlockColorType.cyan;
+      }
+      final board = BoardState(size: 8, cellColors: cells);
+      expect(BoardAnalysis.fromBoard(board).isDanger, isFalse);
+      for (var seed = 0; seed < 80; seed++) {
+        final q = BlockSpawnPolicy.dealRecoveryQueue(
+          board: board,
+          rng: Random(seed),
+        );
+        expect(_singleCount(q.items), lessThanOrEqualTo(1));
+        expect(BoardAnalysis.queueHasAnyLegalMove(board, q.items), isTrue);
+      }
+    },
+  );
 
   test(
     'queueRefillCount increments after three single placements empty tray',

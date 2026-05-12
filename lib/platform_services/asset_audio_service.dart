@@ -37,7 +37,8 @@ class AssetAudioService implements AudioService {
   }
 
   @override
-  Future<void> onTraySelect() => _playAsset('sfx/tray_select.wav', volume: 0.95);
+  Future<void> onTraySelect() =>
+      _playAsset('sfx/tray_select.wav', volume: 0.95);
 
   @override
   Future<void> onUiTap() => _playAsset('sfx/ui_tap.wav', volume: 0.85);
@@ -46,14 +47,14 @@ class AssetAudioService implements AudioService {
   Future<void> onDragTick() => _playAsset('sfx/drag_tick.wav', volume: 0.7);
 
   @override
-  Future<void> onPlacement() => _playAsset('sfx/placement.wav');
+  Future<void> onPlacement() => _playAsset('sfx/placement.wav', volume: 0.92);
 
   @override
   Future<void> onClear({required bool isCombo}) {
     if (isCombo) {
-      return _playAsset('sfx/combo_rise.wav');
+      return _playAsset('sfx/combo_rise.wav', volume: 0.98);
     }
-    return _playAsset('sfx/line_clear.wav');
+    return _playAsset('sfx/line_clear.wav', volume: 0.96);
   }
 
   @override
@@ -63,7 +64,8 @@ class AssetAudioService implements AudioService {
   Future<void> onGameOver() => _playAsset('sfx/game_over.wav', volume: 0.9);
 
   @override
-  Future<void> onSplashIntro() => _playAsset('sfx/splash_intro.wav', volume: 0.85);
+  Future<void> onSplashIntro() =>
+      _playAsset('sfx/splash_intro.wav', volume: 0.85);
 
   @override
   Future<void> dispose() async {

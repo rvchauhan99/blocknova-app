@@ -5,10 +5,7 @@ import '../platform_services/haptics_service.dart';
 import 'runtime_feedback.dart';
 
 class RuntimeActionResult {
-  const RuntimeActionResult({
-    required this.session,
-    required this.events,
-  });
+  const RuntimeActionResult({required this.session, required this.events});
 
   final GameSession session;
   final List<RuntimeFeedbackEvent> events;
@@ -18,8 +15,8 @@ class RuntimeSessionDriver {
   RuntimeSessionDriver({
     required HapticsService hapticsService,
     required AudioService audioService,
-  })  : _haptics = hapticsService,
-        _audio = audioService;
+  }) : _haptics = hapticsService,
+       _audio = audioService;
 
   final HapticsService _haptics;
   final AudioService _audio;
@@ -46,8 +43,18 @@ class RuntimeSessionDriver {
       );
     }
 
-    final placed = _diffPlacedKeys(before: current.board, after: result.session.board);
-    final cleared = _diffClearedKeys(before: current.board, after: result.session.board);
+    final shape = current.selectedShape!;
+    final placedBoard = current.board.place(
+      shape: shape,
+      originX: x,
+      originY: y,
+    );
+    final clearResult = placedBoard.clearCompletedLines();
+    final cleared = _clearedLineKeys(placedBoard, clearResult);
+    final placed = _diffPlacedKeys(
+      before: current.board,
+      after: placedBoard,
+    ).difference(cleared);
 
     final events = <RuntimeFeedbackEvent>[
       RuntimeFeedbackEvent(
@@ -103,13 +110,23 @@ class RuntimeSessionDriver {
     required BoardState before,
     required BoardState after,
   }) {
-    return after.occupied.where((key) => !before.occupied.contains(key)).toSet();
+    return after.occupied
+        .where((key) => !before.occupied.contains(key))
+        .toSet();
   }
 
-  Set<int> _diffClearedKeys({
-    required BoardState before,
-    required BoardState after,
-  }) {
-    return before.occupied.where((key) => !after.occupied.contains(key)).toSet();
+  Set<int> _clearedLineKeys(BoardState placedBoard, ClearResult clearResult) {
+    final keys = <int>{};
+    for (final y in clearResult.clearedRows) {
+      for (var x = 0; x < placedBoard.size; x++) {
+        keys.add(placedBoard.keyFor(x, y));
+      }
+    }
+    for (final x in clearResult.clearedCols) {
+      for (var y = 0; y < placedBoard.size; y++) {
+        keys.add(placedBoard.keyFor(x, y));
+      }
+    }
+    return keys;
   }
 }
